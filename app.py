@@ -1,21 +1,10 @@
-import os
-import re
-import time
-import imaplib
-import email
-import datetime
-import random
-import string
-import base64
-import sqlite3
-import hashlib
-import secrets
+import os, re, time, imaplib, email, datetime, random, string, base64, sqlite3, secrets, json
 from io import BytesIO
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
+from functools import wraps
 from flask import Flask, request, jsonify, render_template, session, g
 from werkzeug.security import generate_password_hash, check_password_hash
-from functools import wraps
 import qrcode
 
 # ---------------- CONFIG ----------------
@@ -23,11 +12,11 @@ app = Flask(__name__, template_folder="templates")
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-
 DB_PATH = os.environ.get("DB_PATH", "fampay.db")
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+BASE_URL = os.environ.get("BASE_URL", "")  # e.g. https://fampay-bronx.onrender.com
 
-# ---------------- DATABASE ----------------
+# ---------------- DB ----------------
 def get_db():
     if 'db' not in g:
         g.db = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -37,8 +26,7 @@ def get_db():
 @app.teardown_appcontext
 def close_db(exc):
     db = g.pop('db', None)
-    if db is not None:
-        db.close()
+    if db: db.close()
 
 def init_db():
     with sqlite3.connect(DB_PATH) as db:
@@ -47,191 +35,190 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            full_name TEXT DEFAULT '',
-            upi_id TEXT DEFAULT '',
-            mobile TEXT DEFAULT '',
-            email TEXT DEFAULT '',
-            app_password TEXT DEFAULT '',
-            total_earning REAL DEFAULT 0,
+            full_name TEXT DEFAULT '', upi_id TEXT DEFAULT '',
+            mobile TEXT DEFAULT '', email TEXT DEFAULT '',
+            app_password TEXT DEFAULT '', total_earning REAL DEFAULT 0,
+            default_qr_minutes INTEGER DEFAULT 15,
+            email_status TEXT DEFAULT 'unknown',
+            email_last_check TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS api_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            api_key TEXT UNIQUE NOT NULL,
-            username TEXT NOT NULL,
-            expiry TEXT NOT NULL,
+            api_key TEXT UNIQUE NOT NULL, username TEXT NOT NULL,
+            expiry TEXT NOT NULL, label TEXT DEFAULT '',
+            total_requests INTEGER DEFAULT 0, total_qr INTEGER DEFAULT 0,
+            total_received REAL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS qr_sessions (
-            order_id TEXT PRIMARY KEY,
-            api_key TEXT NOT NULL,
-            username TEXT NOT NULL,
-            amount REAL NOT NULL,
+            order_id TEXT PRIMARY KEY, api_key TEXT NOT NULL,
+            username TEXT NOT NULL, amount REAL NOT NULL,
             status TEXT DEFAULT 'PENDING',
-            txn_id TEXT DEFAULT '',
-            utr TEXT DEFAULT '',
-            created_at REAL NOT NULL,
-            expires_at REAL NOT NULL
+            txn_id TEXT DEFAULT '', utr TEXT DEFAULT '',
+            paid_amount REAL DEFAULT 0,
+            created_at REAL NOT NULL, expires_at REAL NOT NULL
         );
         CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            order_id TEXT,
-            amount REAL NOT NULL,
-            txn_id TEXT,
-            utr TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL,
+            order_id TEXT, amount REAL NOT NULL,
+            txn_id TEXT, utr TEXT,
             paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT,
+            action TEXT, meta TEXT, ip TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """)
-        # demo user
-        row = db.execute("SELECT id FROM users WHERE username='admin'").fetchone()
-        if not row:
-            db.execute(
-                "INSERT INTO users (username, password_hash, full_name, upi_id, email) VALUES (?,?,?,?,?)",
-                ("admin", generate_password_hash("admin123"), "Riju Mondal", "riju@fam", "")
-            )
+        if not db.execute("SELECT id FROM users WHERE username='admin'").fetchone():
+            db.execute("INSERT INTO users (username,password_hash,full_name,upi_id) VALUES (?,?,?,?)",
+                       ("admin", generate_password_hash("admin123"), "Riju Mondal", "riju@fam"))
         db.commit()
-
 init_db()
 
 # ---------------- HELPERS ----------------
 def login_required(f):
     @wraps(f)
-    def wrapper(*args, **kwargs):
+    def wrapper(*a, **k):
         if 'user' not in session:
-            return jsonify({"error": "Unauthorized"}), 401
-        return f(*args, **kwargs)
+            return jsonify({"error":"Unauthorized"}), 401
+        return f(*a, **k)
     return wrapper
 
-def generate_api_key():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+def log(username, action, meta=""):
+    try:
+        db = get_db()
+        db.execute("INSERT INTO logs (username,action,meta,ip) VALUES (?,?,?,?)",
+                   (username, action, meta, request.remote_addr or ""))
+        db.commit()
+    except: pass
 
-def create_qr_base64(data):
-    qr = qrcode.QRCode(version=1, box_size=10, border=4, error_correction=qrcode.constants.ERROR_CORRECT_M)
-    qr.add_data(data)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = BytesIO()
-    img.save(buf, format="PNG")
+def gen_key(): return ''.join(random.choices(string.ascii_uppercase+string.digits, k=16))
+
+def qr_b64(data):
+    q = qrcode.QRCode(version=1, box_size=10, border=4, error_correction=qrcode.constants.ERROR_CORRECT_M)
+    q.add_data(data); q.make(fit=True)
+    img = q.make_image(fill_color="black", back_color="white")
+    buf = BytesIO(); img.save(buf, format="PNG")
     return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode()}"
 
 def clean_body(msg):
-    body = ""
     if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                try: body = part.get_payload(decode=True).decode(errors="ignore")
-                except: pass
-                break
+        for p in msg.walk():
+            if p.get_content_type()=="text/plain":
+                try: return p.get_payload(decode=True).decode(errors="ignore")
+                except: return ""
     else:
-        try: body = msg.get_payload(decode=True).decode(errors="ignore")
-        except: pass
-    return body
+        try: return msg.get_payload(decode=True).decode(errors="ignore")
+        except: return ""
+    return ""
 
-def check_fampay_email(username, expected_amount, minutes_window=15):
-    """Sirf recent FamPay emails ko read karta hai (purane messages untouch)."""
+def read_fampay_email(username, expected_amount, minutes_window=15, mark_read=True):
+    """
+    Reads only recent FamPay emails. Returns (ok, info, msg).
+    Also updates user's email_status.
+    """
     db = get_db()
-    user = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
-    if not user or not user['email'] or not user['app_password']:
+    u = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    if not u or not u['email'] or not u['app_password']:
+        db.execute("UPDATE users SET email_status='not_configured' WHERE username=?", (username,))
+        db.commit()
         return False, None, "Email not configured"
-
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=15)
-        mail.login(user['email'], user['app_password'].replace(" ", ""))
+        mail.login(u['email'], u['app_password'].replace(" ", ""))
         mail.select("inbox")
-
         today = datetime.datetime.now().strftime("%d-%b-%Y")
         status, messages = mail.search(None, f'(SINCE "{today}" UNSEEN)')
         if status != "OK":
-            return False, None, "Search failed"
-
+            mail.logout(); return False, None, "Search failed"
         email_ids = messages[0].split()
         if not email_ids:
             mail.logout()
+            db.execute("UPDATE users SET email_status='online', email_last_check=? WHERE username=?",
+                       (datetime.datetime.now(IST).isoformat(), username)); db.commit()
             return False, None, "No new emails"
-
         now_ist = datetime.datetime.now(IST)
-
-        for e_id in email_ids[-8:]:  # Latest 8 messages check
-            status, msg_data = mail.fetch(e_id, '(RFC822)')
-            for rp in msg_data:
+        for e_id in email_ids[-10:]:
+            status, data = mail.fetch(e_id, '(RFC822)')
+            for rp in data:
                 if not isinstance(rp, tuple): continue
                 msg = email.message_from_bytes(rp[1])
-                subj_raw = msg.get('subject', '')
-                try: subj = str(decode_header(subj_raw)[0][0])
-                except: subj = subj_raw
-
-                if "FamX" not in subj and "FamApp" not in subj and "Fam" not in subj:
-                    continue
-
-                # Time window check (India time)
+                subj = msg.get('subject','')
+                try: subj = str(decode_header(subj)[0][0])
+                except: pass
+                if not any(x in subj for x in ["Fam", "FamX", "FamApp"]): continue
                 try:
-                    dt = parsedate_to_datetime(msg.get('date'))
-                    dt_ist = dt.astimezone(IST)
-                    diff_min = (now_ist - dt_ist).total_seconds() / 60
-                    if diff_min > minutes_window or diff_min < -3:
-                        continue
-                except:
-                    continue
-
+                    dt = parsedate_to_datetime(msg.get('date')).astimezone(IST)
+                    diff = (now_ist - dt).total_seconds()/60
+                    if diff > minutes_window or diff < -3: continue
+                except: continue
                 body = clean_body(msg)
-                amt_m = re.search(r'₹\s?([\d,]+\.?\d*)', body)
-                if not amt_m: continue
-                recv_amt = float(amt_m.group(1).replace(",", ""))
-                if recv_amt < expected_amount: continue
-
+                am = re.search(r'₹\s?([\d,]+\.?\d*)', body)
+                if not am: continue
+                recv = float(am.group(1).replace(",", ""))
+                if recv < expected_amount - 0.01: continue
                 txn_m = re.search(r'Transaction ID\s*:\s*([A-Z0-9]+)', body)
                 txn_id = txn_m.group(1) if txn_m else "UNKNOWN"
                 utr_m = re.search(r'UTR\s*:\s*(\d+)', body)
                 utr = utr_m.group(1) if utr_m else ""
-
-                mail.store(e_id, '+FLAGS', '\\Seen')
+                if mark_read:
+                    try: mail.store(e_id, '+FLAGS', '\\Seen')
+                    except: pass
                 mail.logout()
-                return True, {"txn_id": txn_id, "utr": utr, "amount": recv_amt}, "OK"
-
+                db.execute("UPDATE users SET email_status='online', email_last_check=? WHERE username=?",
+                           (now_ist.isoformat(), username)); db.commit()
+                return True, {"txn_id": txn_id, "utr": utr, "amount": recv}, "OK"
         mail.logout()
+        db.execute("UPDATE users SET email_status='online', email_last_check=? WHERE username=?",
+                   (now_ist.isoformat(), username)); db.commit()
         return False, None, "No matching FamPay email"
     except Exception as e:
-        return False, None, f"Email error: {str(e)}"
+        db.execute("UPDATE users SET email_status='offline' WHERE username=?", (username,))
+        db.commit()
+        return False, None, f"Email error: {e}"
 
-# ---------------- ROUTES ----------------
+def build_url(path):
+    base = BASE_URL.rstrip('/') or request.host_url.rstrip('/')
+    return base + path
 
+# ---------------- AUTH ROUTES ----------------
 @app.route('/')
-def home():
-    return render_template("index.html")
+def home(): return render_template("index.html")
 
 @app.route('/api/register', methods=['POST'])
 def register():
-    data = request.json or {}
-    u = (data.get('username') or '').strip().lower()
-    p = data.get('password') or ''
+    d = request.json or {}
+    u = (d.get('username') or '').strip().lower()
+    p = d.get('password') or ''
     if len(u) < 3 or len(p) < 4:
-        return jsonify({"error": "Username min 3 chars, Password min 4 chars"}), 400
+        return jsonify({"error":"Username min 3 chars, Password min 4"}), 400
     db = get_db()
     try:
-        db.execute("INSERT INTO users (username, password_hash) VALUES (?,?)",
-                   (u, generate_password_hash(p)))
-        db.commit()
-        return jsonify({"status": "success", "message": "Account created"})
+        db.execute("INSERT INTO users (username,password_hash) VALUES (?,?)",
+                   (u, generate_password_hash(p))); db.commit()
+        log(u, "REGISTER")
+        return jsonify({"status":"success"})
     except sqlite3.IntegrityError:
-        return jsonify({"error": "Username already exists"}), 409
+        return jsonify({"error":"Username exists"}), 409
 
 @app.route('/api/login', methods=['POST'])
 def login():
-    data = request.json or {}
-    u = (data.get('username') or '').strip().lower()
-    p = data.get('password') or ''
+    d = request.json or {}
+    u = (d.get('username') or '').strip().lower()
+    p = d.get('password') or ''
     db = get_db()
-    user = db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
-    if user and check_password_hash(user['password_hash'], p):
+    row = db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
+    if row and check_password_hash(row['password_hash'], p):
         session['user'] = u
-        return jsonify({"status": "success", "user": u})
-    return jsonify({"error": "Invalid credentials"}), 401
+        log(u, "LOGIN")
+        return jsonify({"status":"success","user":u})
+    return jsonify({"error":"Invalid credentials"}), 401
 
 @app.route('/api/logout', methods=['POST'])
 def logout():
-    session.clear()
-    return jsonify({"status": "success"})
+    session.clear(); return jsonify({"status":"success"})
 
 @app.route('/api/me', methods=['GET'])
 @login_required
@@ -239,13 +226,13 @@ def me():
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE username=?", (session['user'],)).fetchone()
     return jsonify({
-        "username": u['username'],
-        "full_name": u['full_name'],
-        "upi_id": u['upi_id'],
-        "mobile": u['mobile'],
-        "email": u['email'],
+        "username": u['username'], "full_name": u['full_name'],
+        "upi_id": u['upi_id'], "mobile": u['mobile'], "email": u['email'],
         "has_app_password": bool(u['app_password']),
-        "total_earning": round(u['total_earning'], 2)
+        "total_earning": round(u['total_earning'],2),
+        "default_qr_minutes": u['default_qr_minutes'],
+        "email_status": u['email_status'],
+        "email_last_check": u['email_last_check'],
     })
 
 @app.route('/api/setup-account', methods=['POST'])
@@ -253,152 +240,252 @@ def me():
 def setup_account():
     d = request.json or {}
     db = get_db()
-    db.execute("""UPDATE users SET full_name=?, upi_id=?, mobile=?, email=?, app_password=?
-                  WHERE username=?""",
+    db.execute("""UPDATE users SET full_name=?, upi_id=?, mobile=?, email=?, app_password=?,
+                  default_qr_minutes=? WHERE username=?""",
                (d.get('full_name',''), d.get('upi_id',''), d.get('mobile',''),
-                d.get('email',''), d.get('app_password',''), session['user']))
+                d.get('email',''), d.get('app_password',''),
+                int(d.get('default_qr_minutes', 15) or 15), session['user']))
     db.commit()
-    return jsonify({"status": "success", "message": "Account updated"})
+    log(session['user'], "ACCOUNT_UPDATE")
+    return jsonify({"status":"success"})
 
+@app.route('/api/test-email', methods=['POST'])
+@login_required
+def test_email():
+    """Live test if Gmail App Password works — the thing you asked for"""
+    d = request.json or {}
+    email_addr = d.get('email') or ''
+    app_pass = d.get('app_password') or ''
+    if not email_addr or not app_pass:
+        return jsonify({"ok": False, "error": "Email and App Password required"}), 400
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=12)
+        mail.login(email_addr, app_pass.replace(" ", ""))
+        mail.select("inbox", readonly=True)
+        typ, data = mail.search(None, 'ALL')
+        total = len(data[0].split()) if data and data[0] else 0
+        # Also fetch latest FamPay message preview
+        typ, msgs = mail.search(None, '(UNSEEN)')
+        unseen = len(msgs[0].split()) if msgs and msgs[0] else 0
+        mail.logout()
+        db = get_db()
+        db.execute("UPDATE users SET email_status='online', email_last_check=? WHERE username=?",
+                   (datetime.datetime.now(IST).isoformat(), session['user'])); db.commit()
+        return jsonify({
+            "ok": True,
+            "message": "✅ Gmail connected successfully!",
+            "total_emails": total,
+            "unseen_emails": unseen
+        })
+    except Exception as e:
+        db = get_db()
+        db.execute("UPDATE users SET email_status='offline' WHERE username=?", (session['user'],)); db.commit()
+        return jsonify({"ok": False, "error": f"❌ Failed: {str(e)}"}), 400
+
+# ---------------- DASHBOARD ----------------
 @app.route('/api/dashboard', methods=['GET'])
 @login_required
 def dashboard():
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE username=?", (session['user'],)).fetchone()
-    txs = db.execute("""SELECT * FROM transactions WHERE username=?
-                        ORDER BY id DESC LIMIT 20""", (session['user'],)).fetchall()
+    txs = db.execute("SELECT * FROM transactions WHERE username=? ORDER BY id DESC LIMIT 20",
+                     (session['user'],)).fetchall()
+    keys = db.execute("SELECT * FROM api_keys WHERE username=?", (session['user'],)).fetchall()
+    total_req = sum(k['total_requests'] for k in keys)
+    total_qr = sum(k['total_qr'] for k in keys)
+    total_rec = sum(k['total_received'] for k in keys)
+    # last 7 days earning chart
+    chart = []
+    for i in range(6, -1, -1):
+        day = (datetime.datetime.now(IST) - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+        s = db.execute("SELECT SUM(amount) as s FROM transactions WHERE username=? AND DATE(paid_at)=?",
+                       (session['user'], day)).fetchone()['s'] or 0
+        chart.append({"day": day, "amount": round(s,2)})
     return jsonify({
-        "total_earning": round(u['total_earning'], 2),
+        "total_earning": round(u['total_earning'],2),
         "upi_id": u['upi_id'],
-        "transactions": [dict(t) for t in txs]
+        "email_status": u['email_status'],
+        "email_last_check": u['email_last_check'],
+        "total_api_keys": len(keys),
+        "total_requests": total_req,
+        "total_qr_generated": total_qr,
+        "total_received_via_api": round(total_rec,2),
+        "chart": chart,
+        "transactions": [dict(t) for t in txs],
     })
 
+@app.route('/api/logs', methods=['GET'])
+@login_required
+def logs_api():
+    db = get_db()
+    rows = db.execute("SELECT * FROM logs WHERE username=? ORDER BY id DESC LIMIT 50",
+                      (session['user'],)).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+# ---------------- API KEYS ----------------
 @app.route('/api/generate-key', methods=['POST'])
 @login_required
-def generate_key():
+def gen_key_api():
     d = request.json or {}
     mode = d.get('mode', 'days')
-    days = int(d.get('days', 30))
-    if mode == 'lifetime':
-        expiry = 'LIFETIME'
-    else:
-        expiry = (datetime.datetime.now() + datetime.timedelta(days=days)).isoformat()
-
-    key = generate_api_key()
+    days = int(d.get('days', 30) or 30)
+    label = d.get('label', '')[:40]
+    expiry = 'LIFETIME' if mode == 'lifetime' else (datetime.datetime.now()+datetime.timedelta(days=days)).isoformat()
+    key = gen_key()
     db = get_db()
-    db.execute("INSERT INTO api_keys (api_key, username, expiry) VALUES (?,?,?)",
-               (key, session['user'], expiry))
+    db.execute("INSERT INTO api_keys (api_key,username,expiry,label) VALUES (?,?,?,?)",
+               (key, session['user'], expiry, label))
     db.commit()
-    base = request.host_url.rstrip('/')
+    log(session['user'], "KEY_GEN", key)
     return jsonify({
-        "status": "success",
-        "api_key": key,
-        "expiry": expiry,
-        "api_url": f"{base}/v2/fam/{key}",
-        "example": f"{base}/v2/fam/{key}&qr=100"
+        "status":"success", "api_key": key, "expiry": expiry, "label": label,
+        "api_url": build_url(f"/v2/fam/{key}"),
+        "example": build_url(f"/v2/fam/{key}&qr=100"),
+        "check_url": build_url(f"/api/v2/check/{key}")
     })
 
 @app.route('/api/list-keys', methods=['GET'])
 @login_required
 def list_keys():
     db = get_db()
-    rows = db.execute("SELECT api_key, expiry, created_at FROM api_keys WHERE username=? ORDER BY id DESC",
-                      (session['user'],)).fetchall()
-    base = request.host_url.rstrip('/')
+    rows = db.execute("SELECT * FROM api_keys WHERE username=? ORDER BY id DESC", (session['user'],)).fetchall()
     return jsonify([{
-        "api_key": r['api_key'],
-        "expiry": r['expiry'],
+        "api_key": r['api_key'], "expiry": r['expiry'], "label": r['label'],
+        "total_requests": r['total_requests'], "total_qr": r['total_qr'],
+        "total_received": round(r['total_received'],2),
         "created_at": r['created_at'],
-        "url": f"{base}/v2/fam/{r['api_key']}"
+        "url": build_url(f"/v2/fam/{r['api_key']}")
     } for r in rows])
 
 @app.route('/api/delete-key/<api_key>', methods=['DELETE'])
 @login_required
-def delete_key(api_key):
+def del_key(api_key):
     db = get_db()
     db.execute("DELETE FROM api_keys WHERE api_key=? AND username=?", (api_key, session['user']))
     db.commit()
-    return jsonify({"status": "success"})
+    log(session['user'], "KEY_DELETE", api_key)
+    return jsonify({"status":"success"})
 
-@app.route('/api/check-payment/<order_id>', methods=['GET'])
-def check_payment(order_id):
+# ---------------- PUBLIC API (for bots/external) ----------------
+def _key_status(key):
     db = get_db()
-    s = db.execute("SELECT * FROM qr_sessions WHERE order_id=?", (order_id,)).fetchone()
-    if not s:
-        return jsonify({"status": "NOTFOUND"}), 404
-    if s['status'] == 'PAID':
-        return jsonify({"status": "PAID", "txn": {"txn_id": s['txn_id'], "utr": s['utr'], "amount": s['amount']}})
-    if time.time() > s['expires_at']:
-        db.execute("UPDATE qr_sessions SET status='EXPIRED' WHERE order_id=?", (order_id,))
-        db.commit()
-        return jsonify({"status": "EXPIRED"})
-
-    ok, info, msg = check_fampay_email(s['username'], s['amount'], minutes_window=15)
-    if ok:
-        db.execute("UPDATE qr_sessions SET status='PAID', txn_id=?, utr=? WHERE order_id=?",
-                   (info['txn_id'], info['utr'], order_id))
-        db.execute("UPDATE users SET total_earning = total_earning + ? WHERE username=?",
-                   (info['amount'], s['username']))
-        db.execute("""INSERT INTO transactions (username, order_id, amount, txn_id, utr)
-                      VALUES (?,?,?,?,?)""",
-                   (s['username'], order_id, info['amount'], info['txn_id'], info['utr']))
-        db.commit()
-        return jsonify({"status": "PAID", "txn": info})
-    return jsonify({"status": "PENDING"})
-
-# ---------------- PUBLIC API ENDPOINT ----------------
+    row = db.execute("SELECT * FROM api_keys WHERE api_key=?", (key,)).fetchone()
+    if not row: return None, "invalid"
+    if row['expiry'] != 'LIFETIME':
+        try:
+            if datetime.datetime.now() > datetime.datetime.fromisoformat(row['expiry']):
+                return row, "expired"
+        except: pass
+    return row, "active"
 
 @app.route('/v2/fam/<api_key>')
 def fam_qr(api_key):
-    # Support both '&qr=' and '?qr='
     raw = request.full_path.split('/v2/fam/')[1] if '/v2/fam/' in request.full_path else ''
     amount_str = None
-    if '&qr=' in raw: amount_str = raw.split('&qr=')[1].split('&')[0].split('?')[0]
-    else: amount_str = request.args.get('qr')
-
+    if '&qr=' in raw:
+        amount_str = raw.split('&qr=')[1].split('&')[0].split('?')[0]
+    else:
+        amount_str = request.args.get('qr')
+    minutes_str = request.args.get('minutes')  # custom minutes
     if not amount_str:
-        return _error_page("Missing &qr=AMOUNT parameter")
+        return _err("Missing &qr=AMOUNT")
     try:
         amount = float(amount_str)
         if amount <= 0: raise ValueError
-    except:
-        return _error_page("Invalid amount")
+    except: return _err("Invalid amount")
+
+    key_row, status = _key_status(api_key)
+    if status == "invalid": return _err("Invalid API Key")
+    if status == "expired": return _err("API Key Expired")
 
     db = get_db()
-    key_row = db.execute("SELECT * FROM api_keys WHERE api_key=?", (api_key,)).fetchone()
-    if not key_row:
-        return _error_page("Invalid API Key")
-
-    if key_row['expiry'] != 'LIFETIME':
-        try:
-            exp = datetime.datetime.fromisoformat(key_row['expiry'])
-            if datetime.datetime.now() > exp:
-                return _error_page("API Key Expired")
-        except: pass
-
     user = db.execute("SELECT * FROM users WHERE username=?", (key_row['username'],)).fetchone()
     if not user or not user['upi_id']:
-        return _error_page("UPI ID not configured")
+        return _err("UPI ID not configured")
 
-    upi_string = f"upi://pay?pa={user['upi_id']}&pn={user['full_name']}&am={amount}&cu=INR"
-    qr_b64 = create_qr_base64(upi_string)
+    db.execute("UPDATE api_keys SET total_requests=total_requests+1, total_qr=total_qr+1 WHERE api_key=?",
+               (api_key,)); db.commit()
 
+    minutes = int(minutes_str) if minutes_str else (user['default_qr_minutes'] or 15)
+    minutes = max(1, min(minutes, 1440))
+
+    upi = f"upi://pay?pa={user['upi_id']}&pn={user['full_name']}&am={amount}&cu=INR"
     order_id = "ORD" + str(int(time.time())) + str(random.randint(100,999))
     now = time.time()
-    db.execute("""INSERT INTO qr_sessions (order_id, api_key, username, amount, created_at, expires_at)
+    db.execute("""INSERT INTO qr_sessions (order_id,api_key,username,amount,created_at,expires_at)
                   VALUES (?,?,?,?,?,?)""",
-               (order_id, api_key, key_row['username'], amount, now, now + 900))
+               (order_id, api_key, key_row['username'], amount, now, now + minutes*60))
     db.commit()
+    log(key_row['username'], "QR_GEN", f"{api_key}|{amount}")
+    return render_template("qr.html", amount=amount, qr_b64=qr_b64(upi),
+                           order_id=order_id, upi_id=user['upi_id'],
+                           full_name=user['full_name'], minutes=minutes)
 
-    return render_template("qr.html",
-        amount=amount, qr_b64=qr_b64, order_id=order_id,
-        upi_id=user['upi_id'], full_name=user['full_name'])
+@app.route('/api/v2/check/<api_key>')
+def api_check(api_key):
+    """For bots/Telegram: returns JSON status of latest QR or specific order"""
+    key_row, status = _key_status(api_key)
+    if status != "active": return jsonify({"error": status}), 403
+    order_id = request.args.get('order_id')
+    db = get_db()
+    if order_id:
+        s = db.execute("SELECT * FROM qr_sessions WHERE order_id=? AND api_key=?",
+                       (order_id, api_key)).fetchone()
+    else:
+        s = db.execute("SELECT * FROM qr_sessions WHERE api_key=? ORDER BY created_at DESC LIMIT 1",
+                       (api_key,)).fetchone()
+    if not s: return jsonify({"status":"NOTFOUND"})
+    if s['status'] == 'PAID':
+        return jsonify({"status":"PAID", "order_id":s['order_id'],
+                        "amount":s['amount'], "txn_id":s['txn_id'], "utr":s['utr']})
+    if time.time() > s['expires_at']:
+        db.execute("UPDATE qr_sessions SET status='EXPIRED' WHERE order_id=?", (s['order_id'],)); db.commit()
+        return jsonify({"status":"EXPIRED"})
+    ok, info, msg = read_fampay_email(s['username'], s['amount'], minutes_window=60)
+    if ok:
+        db.execute("""UPDATE qr_sessions SET status='PAID',txn_id=?,utr=?,paid_amount=? WHERE order_id=?""",
+                   (info['txn_id'], info['utr'], info['amount'], s['order_id']))
+        db.execute("UPDATE users SET total_earning=total_earning+? WHERE username=?",
+                   (info['amount'], s['username']))
+        db.execute("UPDATE api_keys SET total_received=total_received+? WHERE api_key=?",
+                   (info['amount'], api_key))
+        db.execute("INSERT INTO transactions (username,order_id,amount,txn_id,utr) VALUES (?,?,?,?,?)",
+                   (s['username'], s['order_id'], info['amount'], info['txn_id'], info['utr']))
+        db.commit()
+        return jsonify({"status":"PAID", "order_id":s['order_id'],
+                        "amount":info['amount'], "txn_id":info['txn_id'], "utr":info['utr']})
+    return jsonify({"status":"PENDING", "order_id":s['order_id'], "seconds_left":
+                    int(max(0, s['expires_at']-time.time()))})
 
-def _error_page(msg):
-    return f"""<!DOCTYPE html><html><body style="font-family:Arial;background:#0b0b14;color:#fff;
+@app.route('/api/check-payment/<order_id>')
+def check_payment(order_id):
+    db = get_db()
+    s = db.execute("SELECT * FROM qr_sessions WHERE order_id=?", (order_id,)).fetchone()
+    if not s: return jsonify({"status":"NOTFOUND"}), 404
+    if s['status'] == 'PAID':
+        return jsonify({"status":"PAID","txn":{"txn_id":s['txn_id'],"utr":s['utr'],"amount":s['paid_amount'] or s['amount']}})
+    if time.time() > s['expires_at']:
+        db.execute("UPDATE qr_sessions SET status='EXPIRED' WHERE order_id=?", (order_id,)); db.commit()
+        return jsonify({"status":"EXPIRED"})
+    ok, info, msg = read_fampay_email(s['username'], s['amount'], minutes_window=60)
+    if ok:
+        db.execute("""UPDATE qr_sessions SET status='PAID',txn_id=?,utr=?,paid_amount=? WHERE order_id=?""",
+                   (info['txn_id'], info['utr'], info['amount'], order_id))
+        db.execute("UPDATE users SET total_earning=total_earning+? WHERE username=?",
+                   (info['amount'], s['username']))
+        db.execute("UPDATE api_keys SET total_received=total_received+? WHERE api_key=?",
+                   (info['amount'], s['api_key']))
+        db.execute("INSERT INTO transactions (username,order_id,amount,txn_id,utr) VALUES (?,?,?,?,?)",
+                   (s['username'], order_id, info['amount'], info['txn_id'], info['utr']))
+        db.commit()
+        return jsonify({"status":"PAID","txn":info})
+    return jsonify({"status":"PENDING"})
+
+def _err(msg):
+    return f"""<!doctype html><html><body style="font-family:Inter,Arial;background:#0a0a12;color:#fff;
     display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-    <div style="text-align:center;padding:30px;background:#14142b;border-radius:16px;border:1px solid #ff5757">
-    <h2 style="color:#ff5757">❌ {msg}</h2></div></body></html>""", 400
+    <div style="text-align:center;padding:40px;background:#13131f;border-radius:20px;border:1px solid #ff4757">
+    <h2 style="color:#ff4757;margin:0">❌ {msg}</h2></div></body></html>""", 400
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)
