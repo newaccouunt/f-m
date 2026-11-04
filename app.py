@@ -105,17 +105,23 @@ def clean_body(msg):
         except: return ""
     return ""
 
+# ==========================================
+# FLASH SPEED EMAIL CHECK (Only Last 5 Mins)
+# ==========================================
 def read_fampay_email(username, expected_amount):
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     if not u or not u['email'] or not u['app_password']:
         return False, None, "Email/App Password missing"
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=8)
         mail.login(u['email'], u['app_password'].replace(" ", ""))
         mail.select("inbox", readonly=False)
         
+        # Sirf aaj ke emails check karo
         today_date = datetime.datetime.now(IST).strftime("%d-%b-%Y")
+        
+        # Gmail search: Sirf FamApp se aaye hue emails jo aaj ke hain
         status, messages = mail.search(None, f'(SINCE "{today_date}" FROM "FamApp")')
         
         if status != "OK" or not messages[0]:
@@ -123,16 +129,21 @@ def read_fampay_email(username, expected_amount):
             return False, None, "No new FamPay email today"
             
         email_ids = messages[0].split()
+        
+        # Sirf latest 5 emails check karo (reverse order)
         for e_id in reversed(email_ids[-5:]):
             status, data = mail.fetch(e_id, '(RFC822)')
             for rp in data:
                 if not isinstance(rp, tuple): continue
                 msg = email.message_from_bytes(rp[1])
+                
+                # Time Filter: Sirf 5 minute purane email check karo
                 try:
                     dt = parsedate_to_datetime(msg.get('date')).astimezone(IST)
                     now_ist = datetime.datetime.now(IST)
                     diff_min = (now_ist - dt).total_seconds() / 60
-                    if diff_min > 60 or diff_min < -2: continue
+                    if diff_min > 5 or diff_min < -2: 
+                        continue # Purane emails (jaise 7:50) skip ho jayenge
                 except: continue
                 
                 body = clean_body(msg)
@@ -147,11 +158,13 @@ def read_fampay_email(username, expected_amount):
                 utr_m = re.search(r'UTR\s*:\s*(\d+)', body)
                 utr = utr_m.group(1) if utr_m else ""
 
+                # Auto Mark as Read (Seen)
                 mail.store(e_id, '+FLAGS', '\\Seen')
                 mail.logout()
                 return True, {"txn_id": txn_id, "utr": utr, "amount": recv}, "OK"
+                
         mail.logout()
-        return False, None, "No matching payment today"
+        return False, None, "No latest matching payment found"
     except Exception as e:
         return False, None, str(e)
 
@@ -221,7 +234,7 @@ def test_email():
     if not email_addr or not app_pass:
         return jsonify({"ok": False, "error": "Email and App Password required"}), 400
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=12)
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
         mail.login(email_addr, app_pass.replace(" ", ""))
         mail.select("inbox", readonly=True)
         typ, msgs = mail.search(None, 'ALL')
@@ -272,7 +285,7 @@ def gen_key_api():
     db.execute("INSERT INTO api_keys (api_key,username,expiry,label) VALUES (?,?,?,?)", (key, session['user'], expiry, label))
     db.commit()
     return jsonify({"status":"success", "api_key": key, "expiry": expiry,
-        "api_url": build_url(f"/v2/fam/{key}"), "example": build_url(f"/v2/fam/{key}&qr=100")})
+        "api_url": build_url(f"/v2/fam/{key}"), "example": build_url(f"/v2/fam/{key}?qr=100")})
 
 @app.route('/api/list-keys', methods=['GET'])
 @login_required
@@ -294,11 +307,13 @@ def del_key(api_key):
     return jsonify({"status":"success"})
 
 # ==========================================
-# PUBLIC QR & VERIFICATION API
+# PUBLIC API (URL Smart Fix + Flash Check)
 # ==========================================
 def _key_status(key):
     db = get_db()
-    row = db.execute("SELECT * FROM api_keys WHERE api_key=?", (key,)).fetchone()
+    # Clean any trailing '&' or '?' from key
+    clean_key = key.split('&')[0].split('?')[0]
+    row = db.execute("SELECT * FROM api_keys WHERE api_key=?", (clean_key,)).fetchone()
     if not row: return None, "invalid"
     if row['expiry'] != 'LIFETIME':
         try:
@@ -306,22 +321,26 @@ def _key_status(key):
         except: pass
     return row, "active"
 
-@app.route('/v2/fam/<api_key>')
+@app.route('/v2/fam/<path:api_key>') # Using <path> to handle slashes or extra params
 def fam_qr(api_key):
-    raw = request.full_path.split('/v2/fam/')[1] if '/v2/fam/' in request.full_path else ''
-    amount_str = raw.split('&qr=')[1].split('&')[0].split('?')[0] if '&qr=' in raw else request.args.get('qr')
-    if not amount_str: return "Missing &qr=AMOUNT", 400
+    # SMART FIX: URL se amount nikalna (chahe ?qr=100 ho ya &qr=100)
+    amount_str = request.args.get('qr')
+    if not amount_str and '&qr=' in request.full_path:
+        amount_str = request.full_path.split('&qr=')[1].split('&')[0].split('?')[0]
+        
+    if not amount_str: return "❌ Missing Amount. Use ?qr=100", 400
     try: amount = float(amount_str)
-    except: return "Invalid amount", 400
+    except: return "❌ Invalid amount", 400
 
     key_row, status = _key_status(api_key)
-    if status != "active": return f"API Key {status}", 403
+    if status == "invalid": return "❌ Invalid API Key", 403
+    if status == "expired": return "❌ API Key Expired", 403
 
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE username=?", (key_row['username'],)).fetchone()
-    if not user or not user['upi_id']: return "UPI not set", 400
+    if not user or not user['upi_id']: return "❌ UPI not set", 400
 
-    db.execute("UPDATE api_keys SET total_requests=total_requests+1, total_qr=total_qr+1 WHERE api_key=?", (api_key,)); db.commit()
+    db.execute("UPDATE api_keys SET total_requests=total_requests+1, total_qr=total_qr+1 WHERE api_key=?", (key_row['api_key'],)); db.commit()
 
     minutes = int(request.args.get('minutes', user['default_qr_minutes'] or 15))
     upi = f"upi://pay?pa={user['upi_id']}&pn={user['full_name']}&am={amount}&cu=INR"
@@ -329,13 +348,13 @@ def fam_qr(api_key):
     now = time.time()
     
     db.execute("INSERT INTO qr_sessions (order_id,api_key,username,amount,created_at,expires_at) VALUES (?,?,?,?,?,?)",
-               (order_id, api_key, key_row['username'], amount, now, now + minutes*60))
+               (order_id, key_row['api_key'], key_row['username'], amount, now, now + minutes*60))
     db.commit()
     
     qr_image = qr_b64(upi)
     return render_template_string(QR_HTML_TEMPLATE, amount=amount, qr_b64=qr_image, order_id=order_id, upi_id=user['upi_id'], full_name=user['full_name'], minutes=minutes)
 
-@app.route('/api/v2/check/<api_key>')
+@app.route('/api/v2/check/<path:api_key>')
 def api_check(api_key):
     key_row, status = _key_status(api_key)
     if status != "active": return jsonify({"error": status}), 403
@@ -343,9 +362,9 @@ def api_check(api_key):
     order_id = request.args.get('order_id')
     db = get_db()
     if order_id:
-        s = db.execute("SELECT * FROM qr_sessions WHERE order_id=? AND api_key=?", (order_id, api_key)).fetchone()
+        s = db.execute("SELECT * FROM qr_sessions WHERE order_id=? AND api_key=?", (order_id, key_row['api_key'])).fetchone()
     else:
-        s = db.execute("SELECT * FROM qr_sessions WHERE api_key=? ORDER BY created_at DESC LIMIT 1", (api_key,)).fetchone()
+        s = db.execute("SELECT * FROM qr_sessions WHERE api_key=? ORDER BY created_at DESC LIMIT 1", (key_row['api_key'],)).fetchone()
     
     if not s: return jsonify({"status":"NOTFOUND"})
     if s['status'] == 'PAID':
@@ -359,7 +378,7 @@ def api_check(api_key):
         db.execute("UPDATE qr_sessions SET status='PAID',txn_id=?,utr=?,paid_amount=? WHERE order_id=?",
                    (info['txn_id'], info['utr'], info['amount'], s['order_id']))
         db.execute("UPDATE users SET total_earning=total_earning+? WHERE username=?", (info['amount'], s['username']))
-        db.execute("UPDATE api_keys SET total_received=total_received+? WHERE api_key=?", (info['amount'], api_key))
+        db.execute("UPDATE api_keys SET total_received=total_received+? WHERE api_key=?", (info['amount'], key_row['api_key']))
         db.execute("INSERT INTO transactions (username,order_id,amount,txn_id,utr) VALUES (?,?,?,?,?)",
                    (s['username'], s['order_id'], info['amount'], info['txn_id'], info['utr']))
         db.commit()
@@ -390,35 +409,39 @@ def check_payment(order_id):
     return jsonify({"status":"PENDING"})
 
 # ==========================================
-# HTML TEMPLATES (Inside app.py)
+# HTML TEMPLATES (Neon Rainbow Theme)
 # ==========================================
 
 MAIN_HTML = """
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>FamPay AutoQR — Neon</title>
+<title>FamPay AutoQR — Rainbow</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root{--bg:#05050a;--surface:#0f0f1e;--surface2:#15152a;--border:#1f1f3a;--text:#e8e8f5;--dim:#7a7a9a;
---ng:#00ffb3;--nc:#00d4ff;--np:#a855f7;--dang:#ff4757;--warn:#ffa502;}
+--ng:#00ffb3;--nc:#00d4ff;--np:#a855f7;--npink:#ff00aa;--nwarn:#ffa502;--dang:#ff4757;}
 *{margin:0;padding:0;box-sizing:border-box}body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:-1;background:radial-gradient(600px at 10% 5%,rgba(0,255,179,.08),transparent 60%),radial-gradient(600px at 90% 10%,rgba(168,85,247,.08),transparent 60%)}
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:-1;background:
+radial-gradient(600px at 10% 5%,rgba(0,255,179,.08),transparent 60%),
+radial-gradient(600px at 90% 10%,rgba(168,85,247,.08),transparent 60%),
+radial-gradient(600px at 50% 90%,rgba(255,0,170,.08),transparent 60%)}
 button,input,select{font-family:inherit;outline:none}.hidden{display:none!important}
 .auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
 .auth-card{width:100%;max-width:420px;background:var(--surface);border:1px solid var(--border);border-radius:22px;padding:34px 28px;box-shadow:0 0 40px rgba(0,255,179,.15)}
-.logo{font-size:22px;font-weight:900;text-align:center;margin-bottom:4px;background:linear-gradient(90deg,var(--ng),var(--nc),var(--np));-webkit-background-clip:text;color:transparent}
+.logo{font-size:22px;font-weight:900;text-align:center;margin-bottom:4px;background:linear-gradient(90deg,var(--ng),var(--np),var(--npink),var(--nc));-webkit-background-clip:text;color:transparent;background-size:300% 100%;animation:rbow 4s linear infinite}
+@keyframes rbow{to{background-position:300% 0}}
 .logo-sub{text-align:center;color:var(--dim);font-size:12px;margin-bottom:22px}
 .field{margin-bottom:14px}.field label{display:block;font-size:11px;font-weight:700;color:var(--dim);margin-bottom:6px;text-transform:uppercase}
 .field input{width:100%;padding:12px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;transition:.2s}
 .field input:focus{border-color:var(--ng);box-shadow:0 0 0 3px rgba(0,255,179,.15)}
-.btn{width:100%;padding:13px;border:none;border-radius:10px;font-weight:800;font-size:14px;background:linear-gradient(90deg,var(--ng),var(--nc));color:#05050a;transition:.2s;cursor:pointer}
-.btn:hover{transform:translateY(-1px);box-shadow:0 0 30px rgba(0,255,179,.5)}
+.btn{width:100%;padding:13px;border:none;border-radius:10px;font-weight:800;font-size:14px;background:linear-gradient(90deg,var(--ng),var(--nc),var(--np));color:#05050a;transition:.2s;cursor:pointer;background-size:200% 100%}
+.btn:hover{transform:translateY(-1px);box-shadow:0 0 30px rgba(0,255,179,.5);background-position:100% 0}
 .btn.sec{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
 .btn.sec:hover{box-shadow:none;border-color:var(--ng)}
 .switch{text-align:center;margin-top:14px;font-size:13px;color:var(--dim)}.switch a{color:var(--ng);font-weight:700;cursor:pointer}
 .shell{display:flex;min-height:100vh}
 .sidebar{width:260px;background:var(--surface);border-right:1px solid var(--border);padding:22px 14px;position:fixed;inset:0 auto 0 0;overflow-y:auto;z-index:50;transition:transform .3s}
-.brand{font-size:17px;font-weight:900;padding:0 8px 20px;background:linear-gradient(90deg,var(--ng),var(--nc),var(--np));-webkit-background-clip:text;color:transparent}
+.brand{font-size:17px;font-weight:900;padding:0 8px 20px;background:linear-gradient(90deg,var(--ng),var(--np),var(--npink));-webkit-background-clip:text;color:transparent;background-size:200%;animation:rbow 3s infinite linear}
 .nav{display:flex;flex-direction:column;gap:3px}
 .item{padding:11px 14px;border-radius:10px;color:var(--dim);font-size:13px;font-weight:600;display:flex;align-items:center;gap:10px;cursor:pointer;transition:.15s}
 .item:hover{background:var(--surface2);color:var(--text)}.item.active{background:linear-gradient(90deg,rgba(0,255,179,.15),rgba(168,85,247,.08));color:var(--ng);box-shadow:inset 0 0 20px rgba(0,255,179,.1)}
@@ -432,17 +455,16 @@ button,input,select{font-family:inherit;outline:none}.hidden{display:none!import
 .dot{width:8px;height:8px;border-radius:50%;box-shadow:0 0 8px currentColor}.dot.on{background:var(--ng);color:var(--ng)}.dot.off{background:var(--dang);color:var(--dang)}.dot.unk{background:var(--dim);color:var(--dim)}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:22px;margin-bottom:16px}
 .card h2{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px}
-.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
-@media(max-width:860px){.grid-2,.grid-3,.grid-4{grid-template-columns:1fr}}
-.hero{background:linear-gradient(135deg,rgba(0,255,179,.12),rgba(168,85,247,.12),rgba(0,212,255,.1));border:1px solid rgba(0,255,179,.3);border-radius:20px;padding:26px;position:relative;overflow:hidden}
-.hero-amt{font-size:48px;font-weight:900;margin:8px 0;background:linear-gradient(90deg,var(--ng),var(--nc),var(--np));-webkit-background-clip:text;color:transparent;filter:drop-shadow(0 0 12px rgba(0,255,179,.4))}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:860px){.grid-2,.grid-3{grid-template-columns:1fr}}
+.hero{background:linear-gradient(135deg,rgba(0,255,179,.15),rgba(168,85,247,.15),rgba(255,0,170,.1));border:1px solid rgba(0,255,179,.3);border-radius:20px;padding:26px;position:relative;overflow:hidden}
+.hero-amt{font-size:48px;font-weight:900;margin:8px 0;background:linear-gradient(90deg,var(--ng),var(--np),var(--npink));-webkit-background-clip:text;color:transparent;filter:drop-shadow(0 0 15px rgba(255,0,170,.4))}
 .hero-lbl{font-size:11px;font-weight:800;color:var(--dim);text-transform:uppercase;letter-spacing:2px}
 .hero-sub{font-size:13px;color:var(--dim)}.hero-sub b{color:var(--text)}
 .stat{background:var(--surface2);border:1px solid var(--border);border-radius:14px;padding:16px;position:relative;overflow:hidden}
 .stat::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--ng),var(--nc))}
-.stat.alt::before{background:linear-gradient(90deg,var(--np),var(--nc))}.stat.alt2::before{background:linear-gradient(90deg,var(--warn),var(--ng))}
 .stat-lbl{font-size:10px;color:var(--dim);text-transform:uppercase;letter-spacing:1px;font-weight:700}
-.stat-val{font-size:24px;font-weight:800;margin-top:4px;color:var(--ng)}.stat.alt .stat-val{color:var(--np)}.stat.alt2 .stat-val{color:var(--warn)}
+.stat-val{font-size:24px;font-weight:800;margin-top:4px;color:var(--ng)}.stat.alt .stat-val{color:var(--np)}.stat.alt2 .stat-val{color:var(--npink)}
 .chart{display:flex;align-items:flex-end;gap:8px;height:140px;padding-top:10px}
 .bar-wrap{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px}
 .bar{width:100%;background:linear-gradient(180deg,var(--ng),rgba(0,255,179,.2));border-radius:6px 6px 0 0;min-height:4px;transition:.3s}
@@ -469,13 +491,12 @@ button,input,select{font-family:inherit;outline:none}.hidden{display:none!import
 
 <div id="authScreen" class="auth-wrap">
   <div class="auth-card">
-    <div class="logo">◆ FamPay AutoQR</div><div class="logo-sub">Neon Payment Verification</div>
+    <div class="logo">◆ FamPay AutoQR</div><div class="logo-sub">Neon Rainbow Verification</div>
     <div id="loginForm">
       <div class="field"><label>Username</label><input id="lgU" placeholder="admin"></div>
       <div class="field"><label>Password</label><input id="lgP" type="password" placeholder="••••••"></div>
       <button class="btn" onclick="doLogin()">Login →</button>
       <div class="switch">New? <a onclick="toggleAuth('reg')">Create account</a></div>
-      <div style="font-size:11px;color:var(--dim);text-align:center;margin-top:8px">Demo: admin / admin123</div>
     </div>
     <div id="regForm" class="hidden">
       <div class="field"><label>Username</label><input id="rgU" placeholder="yourname"></div>
@@ -568,7 +589,7 @@ button,input,select{font-family:inherit;outline:none}.hidden{display:none!import
     <section id="p-docs" class="page hidden">
       <div class="card">
         <h2>📖 API Docs</h2>
-        <div class="fg"><label>QR Endpoint</label><div class="api-out"><span>GET /v2/fam/API_KEY&qr=AMOUNT</span></div></div>
+        <div class="fg"><label>QR Endpoint</label><div class="api-out"><span>GET /v2/fam/API_KEY?qr=AMOUNT</span></div></div>
         <div class="fg" style="margin-top:12px"><label>Check Endpoint (JSON)</label><div class="api-out"><span>GET /api/v2/check/API_KEY</span></div></div>
       </div>
     </section>
@@ -667,10 +688,10 @@ QR_HTML_TEMPLATE = """
 <title>Pay ₹{{ amount }}</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box;font-family:'Inter',sans-serif}
-body{background:#05050a;color:#e8e8f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:radial-gradient(circle at 30% 20%,rgba(0,224,164,.15),transparent 45%),radial-gradient(circle at 70% 80%,rgba(0,148,255,.15),transparent 45%),#05050a}
+body{background:#05050a;color:#e8e8f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:radial-gradient(circle at 30% 20%,rgba(0,224,164,.15),transparent 45%),radial-gradient(circle at 70% 80%,rgba(168,85,247,.15),transparent 45%),#05050a}
 .card{width:100%;max-width:430px;background:#0f0f1e;border:1px solid #1f1f3a;border-radius:24px;padding:30px 24px;box-shadow:0 0 60px rgba(0,224,164,.12);text-align:center}
 .tag{font-size:12px;color:#7a7a9a;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px}
-h1{font-size:44px;font-weight:800;margin:6px 0;background:linear-gradient(90deg,#00e0a4,#0094ff,#a855f7);-webkit-background-clip:text;color:transparent}
+h1{font-size:44px;font-weight:800;margin:6px 0;background:linear-gradient(90deg,#00ffb3,#a855f7,#ff00aa);-webkit-background-clip:text;color:transparent}
 .qr-wrap{background:#fff;border-radius:18px;padding:12px;display:inline-block;margin:16px 0;box-shadow:0 0 50px rgba(0,224,164,.3);position:relative}
 .qr-wrap img{display:block;width:240px;height:240px}
 .qr-wrap.verified::after{content:'✅';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:130px;background:rgba(0,224,164,.9);border-radius:18px}
