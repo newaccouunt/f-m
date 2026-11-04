@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FamPay AutoQR — Premium Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0a0a12; --surface:#13131f; --surface2:#1b1b2e; --border:#252538;
+  --text:#e8e8f5; --text-dim:#8a8aa8; --primary:#00e0a4; --primary-2:#0094ff;
+  --danger:#ff4757; --warning:#ffa502; --success:#00e0a4;
+  --radius:14px; --shadow:0 8px 30px rgba(0,0,0,.35);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{font-family:'Inter',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);
+  -webkit-font-smoothing:antialiased;line-height:1.5;}
+button{cursor:pointer;font-family:inherit}
+input,select,textarea{font-family:inherit}
+.hidden{display:none!important}
+
+/* ---------- AUTH ---------- */
+.auth-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;
+  background:radial-gradient(circle at 20% 20%, rgba(0,224,164,.12), transparent 40%),
+             radial-gradient(circle at 80% 80%, rgba(0,148,255,.12), transparent 40%), var(--bg);}
+.auth-card{width:100%;max-width:420px;background:var(--surface);border:1px solid var(--border);
+  border-radius:20px;padding:36px 30px;box-shadow:var(--shadow);animation:fadeUp .5s ease;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.auth-logo{font-size:24px;font-weight:800;background:linear-gradient(90deg,var(--primary),var(--primary-2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:6px;text-align:center}
+.auth-sub{text-align:center;color:var(--text-dim);font-size:13px;margin-bottom:26px}
+.field{margin-bottom:14px}
+.field label{display:block;font-size:12px;font-weight:600;color:var(--text-dim);margin-bottom:6px;
+  text-transform:uppercase;letter-spacing:.5px}
+.field input{width:100%;padding:12px 14px;background:var(--surface2);border:1px solid var(--border);
+  border-radius:10px;color:var(--text);font-size:14px;transition:.2s}
+.field input:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(0,224,164,.15)}
+.btn{width:100%;padding:12px;border:none;border-radius:10px;font-weight:700;font-size:14px;
+  background:linear-gradient(90deg,var(--primary),var(--primary-2));color:#000;transition:.2s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 8px 20px rgba(0,224,164,.3)}
+.btn.secondary{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
+.btn.secondary:hover{background:var(--border);box-shadow:none}
+.btn.danger{background:var(--danger);color:#fff}
+.switch-link{text-align:center;margin-top:16px;font-size:13px;color:var(--text-dim)}
+.switch-link a{color:var(--primary);text-decoration:none;font-weight:600;cursor:pointer}
+.hint{font-size:11px;color:var(--text-dim);margin-top:6px}
+
+/* ---------- APP SHELL ---------- */
+.app-shell{display:flex;min-height:100vh}
+.sidebar{width:260px;background:var(--surface);border-right:1px solid var(--border);
+  padding:22px 16px;position:fixed;top:0;left:0;height:100vh;overflow-y:auto;z-index:50;
+  transition:transform .3s ease}
+.sidebar-brand{font-size:18px;font-weight:800;background:linear-gradient(90deg,var(--primary),var(--primary-2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:24px;padding:0 8px}
+.nav{display:flex;flex-direction:column;gap:4px}
+.nav-item{padding:11px 14px;border-radius:10px;color:var(--text-dim);font-size:14px;font-weight:500;
+  display:flex;align-items:center;gap:10px;transition:.15s;cursor:pointer}
+.nav-item:hover{background:var(--surface2);color:var(--text)}
+.nav-item.active{background:linear-gradient(90deg,rgba(0,224,164,.15),rgba(0,148,255,.1));
+  color:var(--primary);font-weight:600}
+.nav-section{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:#5a5a72;
+  margin:18px 0 8px;padding:0 14px;font-weight:700}
+.main{flex:1;margin-left:260px;padding:28px;max-width:100%;}
+@media(max-width:860px){
+  .sidebar{transform:translateX(-100%)}
+  .sidebar.open{transform:translateX(0)}
+  .main{margin-left:0;padding:16px}
+}
+.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;
+  padding-bottom:18px;border-bottom:1px solid var(--border);gap:12px}
+.topbar h1{font-size:22px;font-weight:700}
+.topbar .user-chip{display:flex;align-items:center;gap:10px;padding:6px 12px;
+  background:var(--surface);border:1px solid var(--border);border-radius:30px;font-size:13px}
+.hamburger{display:none;background:var(--surface2);border:1px solid var(--border);
+  color:var(--text);padding:8px 10px;border-radius:8px}
+@media(max-width:860px){.hamburger{display:block}}
+
+/* ---------- CARDS ---------- */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:24px;margin-bottom:20px;animation:fadeUp .35s ease}
+.card h2{font-size:16px;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media(max-width:860px){.grid-2,.grid-3{grid-template-columns:1fr}}
+
+/* ---------- EARNINGS CARD ---------- */
+.earn-card{background:linear-gradient(135deg,rgba(0,224,164,.15),rgba(0,148,255,.15));
+  border:1px solid rgba(0,224,164,.3);border-radius:var(--radius);padding:28px;position:relative;overflow:hidden}
+.earn-card::before{content:'';position:absolute;top:-50%;right:-50%;width:200%;height:200%;
+  background:radial-gradient(circle,rgba(0,224,164,.15),transparent 60%);animation:pulse 4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:.8}}
+.earn-label{font-size:12px;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;
+  font-weight:600;position:relative}
+.earn-amount{font-size:42px;font-weight:800;margin:10px 0;
+  background:linear-gradient(90deg,var(--primary),var(--primary-2));
+  -webkit-background-clip:text;background-clip:text;color:transparent;position:relative}
+.earn-upi{font-size:13px;color:var(--text-dim);position:relative}
+.earn-upi b{color:var(--text)}
+
+/* ---------- FORMS ---------- */
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+@media(max-width:600px){.form-row{grid-template-columns:1fr}}
+.form-group{display:flex;flex-direction:column;gap:6px}
+.form-group label{font-size:12px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px}
+.form-group input,.form-group select{padding:11px 14px;background:var(--surface2);
+  border:1px solid var(--border);border-radius:10px;color:var(--text);font-size:14px;transition:.2s}
+.form-group input:focus,.form-group select:focus{outline:none;border-color:var(--primary);
+  box-shadow:0 0 0 3px rgba(0,224,164,.15)}
+
+/* ---------- API OUTPUT ---------- */
+.api-out{background:#08080f;border:1px dashed rgba(0,224,164,.4);padding:14px;
+  border-radius:10px;color:var(--primary);font-family:'SF Mono',Monaco,monospace;
+  font-size:12px;word-break:break-all;margin-top:10px;position:relative;
+  display:flex;justify-content:space-between;align-items:center;gap:10px}
+.api-out .copy-btn{background:var(--surface2);border:1px solid var(--border);color:var(--text);
+  padding:6px 10px;border-radius:6px;font-size:11px;font-weight:600;flex-shrink:0}
+.api-out .copy-btn:hover{background:var(--primary);color:#000;border-color:var(--primary)}
+
+/* ---------- TXN LIST ---------- */
+.txn{display:flex;justify-content:space-between;align-items:center;padding:14px;
+  background:var(--surface2);border-radius:10px;margin-bottom:8px;font-size:13px}
+.txn .amt{color:var(--success);font-weight:700}
+.txn .meta{color:var(--text-dim);font-size:11px;margin-top:2px}
+
+/* ---------- FEATURE LIST ---------- */
+.feature-list{list-style:none}
+.feature-list li{padding:12px 0;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:12px;font-size:14px}
+.feature-list li:last-child{border-bottom:none}
+.feature-list li::before{content:'✓';width:24px;height:24px;border-radius:50%;
+  background:rgba(0,224,164,.15);color:var(--primary);display:flex;align-items:center;
+  justify-content:center;font-weight:700;font-size:12px;flex-shrink:0}
+
+/* ---------- TOAST ---------- */
+#toast{position:fixed;bottom:24px;right:24px;padding:14px 20px;border-radius:10px;
+  background:var(--surface2);color:var(--text);font-size:13px;font-weight:500;
+  box-shadow:0 10px 40px rgba(0,0,0,.5);transform:translateY(100px);opacity:0;
+  transition:.3s;z-index:1000;border-left:3px solid var(--primary);max-width:320px}
+#toast.show{transform:translateY(0);opacity:1}
+#toast.error{border-left-color:var(--danger)}
+
+/* ---------- EMPTY ---------- */
+.empty{text-align:center;padding:40px 20px;color:var(--text-dim);font-size:14px}
+.empty-icon{font-size:40px;margin-bottom:10px;opacity:.5}
+</style>
+</head>
+<body>
+
+<!-- ========== AUTH SCREEN ========== -->
+<div id="authScreen" class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-logo">💸 FamPay AutoQR</div>
+    <div class="auth-sub">Auto payment verification platform</div>
+
+    <div id="loginForm">
+      <div class="field"><label>Username</label><input id="lgUser" placeholder="admin" autocomplete="username" /></div>
+      <div class="field"><label>Password</label><input id="lgPass" type="password" placeholder="••••••" autocomplete="current-password" /></div>
+      <button class="btn" onclick="doLogin()">Login →</button>
+      <div class="switch-link">Don't have account? <a onclick="toggleAuth('reg')">Create one</a></div>
+      <div class="hint">Demo: admin / admin123</div>
+    </div>
+
+    <div id="regForm" class="hidden">
+      <div class="field"><label>Username</label><input id="rgUser" placeholder="yourname" /></div>
+      <div class="field"><label>Password</label><input id="rgPass" type="password" placeholder="Min 4 characters" /></div>
+      <button class="btn" onclick="doRegister()">Create Account →</button>
+      <div class="switch-link">Already have account? <a onclick="toggleAuth('login')">Login</a></div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== APP ========== -->
+<div id="appShell" class="app-shell hidden">
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">💸 FamPay AutoQR</div>
+    <nav class="nav">
+      <div class="nav-item active" data-page="dashboard" onclick="go('dashboard')">📊 Dashboard</div>
+      <div class="nav-item" data-page="account" onclick="go('account')">👤 Account</div>
+      <div class="nav-item" data-page="keys" onclick="go('keys')">🔑 API Keys</div>
+      <div class="nav-section">Advance</div>
+      <div class="nav-item" data-page="features" onclick="go('features')">⚡ Features</div>
+      <div class="nav-item" data-page="history" onclick="go('history')">📜 Transactions</div>
+      <div class="nav-item" data-page="docs" onclick="go('docs')">📖 API Docs</div>
+      <div class="nav-item" data-page="webhooks" onclick="go('webhooks')">🔔 Webhooks</div>
+      <div class="nav-item" data-page="settings" onclick="go('settings')">⚙️ Settings</div>
+    </nav>
+    <div style="margin-top:auto;padding-top:20px">
+      <button class="btn secondary" onclick="doLogout()">🚪 Logout</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div style="display:flex;align-items:center;gap:12px">
+        <button class="hamburger" onclick="document.getElementById('sidebar').classList.toggle('open')">☰</button>
+        <h1 id="pageTitle">Dashboard</h1>
+      </div>
+      <div class="user-chip">👤 <span id="chipUser">-</span></div>
+    </div>
+
+    <!-- DASHBOARD -->
+    <section id="page-dashboard" class="page">
+      <div class="earn-card">
+        <div class="earn-label">💰 Total Earning (Live)</div>
+        <div class="earn-amount">₹ <span id="totalEarn">0.00</span></div>
+        <div class="earn-upi">UPI: <b id="earnUpi">-</b></div>
+      </div>
+      <div class="grid-2" style="margin-top:20px">
+        <div class="card">
+          <h2>⚡ Quick Test QR</h2>
+          <div class="form-group"><label>Amount (₹)</label><input id="quickAmt" type="number" value="100" /></div>
+          <button class="btn" style="margin-top:12px" onclick="quickQR()">Generate QR</button>
+          <div id="quickQRBox" style="margin-top:12px"></div>
+        </div>
+        <div class="card">
+          <h2>📌 Setup Checklist</h2>
+          <ul class="feature-list" id="setupList"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ACCOUNT -->
+    <section id="page-account" class="page hidden">
+      <div class="card">
+        <h2>👤 Account Details</h2>
+        <div class="form-row">
+          <div class="form-group"><label>Full Name (as in FamPay)</label><input id="accName" /></div>
+          <div class="form-group"><label>UPI ID</label><input id="accUpi" placeholder="you@fam" /></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label>Mobile</label><input id="accMobile" /></div>
+          <div class="form-group"><label>Gmail Address</label><input id="accEmail" type="email" /></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group" style="grid-column:span 2">
+            <label>Gmail App Password (16 chars)</label>
+            <input id="accAppPass" type="password" placeholder="xxxx xxxx xxxx xxxx" />
+            <span class="hint">Generate: Google Account → Security → 2-Step Verification → App Passwords</span>
+          </div>
+        </div>
+        <button class="btn" onclick="saveAccount()">💾 Save Account</button>
+      </div>
+    </section>
+
+    <!-- KEYS -->
+    <section id="page-keys" class="page hidden">
+      <div class="card">
+        <h2>🔑 Generate API Key</h2>
+        <div class="form-row">
+          <div class="form-group"><label>Expiry Type</label>
+            <select id="expMode" onchange="toggleExpiry()">
+              <option value="days">Custom Days</option>
+              <option value="lifetime">Lifetime</option>
+            </select>
+          </div>
+          <div class="form-group" id="expDaysWrap"><label>Days</label><input id="expDays" type="number" value="30" /></div>
+        </div>
+        <button class="btn" onclick="genKey()">🚀 Generate API Key</button>
+        <div id="apiResult" style="margin-top:16px"></div>
+      </div>
+      <div class="card">
+        <h2>📋 Your API Keys</h2>
+        <div id="keysList"></div>
+      </div>
+    </section>
+
+    <!-- FEATURES -->
+    <section id="page-features" class="page hidden">
+      <div class="card">
+        <h2>⚡ Advance Features</h2>
+        <ul class="feature-list">
+          <li>Auto Payment Verification via Gmail App Password</li>
+          <li>15-Minute QR Expiry with Realtime Countdown</li>
+          <li>Live Total Earning Dashboard</li>
+          <li>Custom / Lifetime API Keys</li>
+          <li>Real-time Transaction History</li>
+          <li>Latest-Only Email Reading (no old spam)</li>
+          <li>Multi-UPI App Support (GPay, PhonePe, Paytm)</li>
+          <li>Secure SQLite Storage (persists on Render)</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- HISTORY -->
+    <section id="page-history" class="page hidden">
+      <div class="card">
+        <h2>📜 Transaction History</h2>
+        <div id="txnList"></div>
+      </div>
+    </section>
+
+    <!-- DOCS -->
+    <section id="page-docs" class="page hidden">
+      <div class="card">
+        <h2>📖 API Documentation</h2>
+        <p style="color:var(--text-dim);font-size:13px;margin-bottom:12px">
+          Generate a QR code that automatically verifies payment via Gmail.
+        </p>
+        <div class="form-group"><label>Endpoint</label>
+          <div class="api-out"><span>GET /v2/fam/API_KEY&qr=AMOUNT</span></div>
+        </div>
+        <div class="form-group" style="margin-top:14px"><label>Example</label>
+          <div class="api-out"><span id="docExample">/v2/fam/YOUR_KEY&qr=100</span>
+            <button class="copy-btn" onclick="copyText(document.getElementById('docExample').innerText)">Copy</button>
+          </div>
+        </div>
+        <ul class="feature-list" style="margin-top:18px">
+          <li>Amount: any positive number (e.g. 100, 250.50)</li>
+          <li>QR expires after 15 minutes</li>
+          <li>Polling endpoint: <code style="color:var(--primary)">/api/check-payment/&lt;order_id&gt;</code></li>
+          <li>Verified only when FamPay email arrives in Gmail</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- WEBHOOKS -->
+    <section id="page-webhooks" class="page hidden">
+      <div class="card">
+        <h2>🔔 Webhook URL</h2>
+        <div class="form-group"><label>Your Callback URL</label>
+          <input id="whUrl" placeholder="https://yourdomain.com/webhook" />
+        </div>
+        <button class="btn" style="margin-top:12px" onclick="saveWebhook()">Save Webhook</button>
+        <p class="hint" style="margin-top:10px">Payment verified hote hi is URL par POST request jayegi (coming in v2).</p>
+      </div>
+    </section>
+
+    <!-- SETTINGS -->
+    <section id="page-settings" class="page hidden">
+      <div class="card">
+        <h2>⚙️ Settings</h2>
+        <ul class="feature-list">
+          <li>🔒 App password is never shared publicly</li>
+          <li>🕒 Email check window: 15 minutes (latest only)</li>
+          <li>📱 UPI: <span id="setUpi">-</span></li>
+          <li>✉️ Email: <span id="setEmail">-</span></li>
+          <li>⏱️ QR validity: 15 minutes</li>
+        </ul>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ---------------- Utilities ---------------- */
+function toast(msg, isError) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(window.__toastT);
+  window.__toastT = setTimeout(() => t.className = '', 3000);
+}
+function copyText(txt) {
+  navigator.clipboard.writeText(txt).then(() => toast('✅ Copied!'));
+}
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    ...opts
+  });
+  let d;
+  try { d = await r.json(); } catch { d = {}; }
+  if (!r.ok) throw new Error(d.error || d.message || 'Request failed');
+  return d;
+}
+
+/* ---------------- Auth ---------------- */
+function toggleAuth(mode) {
+  document.getElementById('loginForm').classList.toggle('hidden', mode !== 'login');
+  document.getElementById('regForm').classList.toggle('hidden', mode !== 'reg');
+}
+async function doLogin() {
+  try {
+    const u = document.getElementById('lgUser').value.trim();
+    const p = document.getElementById('lgPass').value;
+    if (!u || !p) return toast('Enter username and password', true);
+    await api('/api/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
+    toast('✅ Logged in');
+    enterApp();
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+async function doRegister() {
+  try {
+    const u = document.getElementById('rgUser').value.trim();
+    const p = document.getElementById('rgPass').value;
+    if (!u || !p) return toast('Fill all fields', true);
+    await api('/api/register', { method: 'POST', body: JSON.stringify({ username: u, password: p }) });
+    toast('✅ Account created — please login');
+    toggleAuth('login');
+    document.getElementById('lgUser').value = u;
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+async function doLogout() {
+  await api('/api/logout', { method: 'POST' });
+  location.reload();
+}
+
+/* ---------------- Navigation ---------------- */
+function go(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+  document.getElementById('page-' + page).classList.remove('hidden');
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  const titles = {
+    dashboard: 'Dashboard', account: 'Account', keys: 'API Keys',
+    features: 'Advance Features', history: 'Transactions', docs: 'API Docs',
+    webhooks: 'Webhooks', settings: 'Settings'
+  };
+  document.getElementById('pageTitle').textContent = titles[page] || page;
+  document.getElementById('sidebar').classList.remove('open');
+  if (page === 'keys') loadKeys();
+  if (page === 'history') loadHistory();
+}
+
+/* ---------------- App Entry ---------------- */
+async function enterApp() {
+  document.getElementById('authScreen').classList.add('hidden');
+  document.getElementById('appShell').classList.remove('hidden');
+  try {
+    const me = await api('/api/me');
+    document.getElementById('chipUser').textContent = me.username;
+    loadAccountData(me);
+    loadDashboardData();
+  } catch { location.reload(); }
+}
+
+function loadAccountData(me) {
+  document.getElementById('accName').value = me.full_name || '';
+  document.getElementById('accUpi').value = me.upi_id || '';
+  document.getElementById('accMobile').value = me.mobile || '';
+  document.getElementById('accEmail').value = me.email || '';
+  document.getElementById('setUpi').textContent = me.upi_id || '-';
+  document.getElementById('setEmail').textContent = me.email || '-';
+
+  const checklist = [
+    { ok: !!me.full_name, text: 'Full Name set' },
+    { ok: !!me.upi_id, text: 'UPI ID configured' },
+    { ok: !!me.email, text: 'Gmail connected' },
+    { ok: me.has_app_password, text: 'App Password saved' }
+  ];
+  document.getElementById('setupList').innerHTML = checklist.map(c =>
+    `<li style="${c.ok ? '' : 'opacity:.5'}">${c.text} ${c.ok ? '✅' : '⏳'}</li>`
+  ).join('');
+}
+
+async function loadDashboardData() {
+  try {
+    const d = await api('/api/dashboard');
+    document.getElementById('totalEarn').textContent = d.total_earning.toFixed(2);
+    document.getElementById('earnUpi').textContent = d.upi_id || '-';
+  } catch {}
+}
+
+/* ---------------- Account Save ---------------- */
+async function saveAccount() {
+  try {
+    await api('/api/setup-account', {
+      method: 'POST',
+      body: JSON.stringify({
+        full_name: document.getElementById('accName').value,
+        upi_id: document.getElementById('accUpi').value,
+        mobile: document.getElementById('accMobile').value,
+        email: document.getElementById('accEmail').value,
+        app_password: document.getElementById('accAppPass').value
+      })
+    });
+    toast('✅ Account saved');
+    document.getElementById('accAppPass').value = '';
+    enterApp();
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+
+/* ---------------- Keys ---------------- */
+function toggleExpiry() {
+  const mode = document.getElementById('expMode').value;
+  document.getElementById('expDaysWrap').style.display = mode === 'lifetime' ? 'none' : 'flex';
+}
+async function genKey() {
+  try {
+    const mode = document.getElementById('expMode').value;
+    const days = document.getElementById('expDays').value;
+    const d = await api('/api/generate-key', {
+      method: 'POST',
+      body: JSON.stringify({ mode, days: parseInt(days) || 30 })
+    });
+    document.getElementById('apiResult').innerHTML = `
+      <div class="card" style="background:rgba(0,224,164,.05);border-color:rgba(0,224,164,.3);padding:18px;margin:0">
+        <div style="font-weight:700;color:var(--primary);margin-bottom:8px">✅ API Key Generated</div>
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px">Expiry: ${d.expiry}</div>
+        <div class="api-out"><span>${d.example}</span>
+          <button class="copy-btn" onclick="copyText('${d.example}')">Copy</button>
+        </div>
+      </div>`;
+    loadKeys();
+    toast('✅ API Key created');
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+async function loadKeys() {
+  try {
+    const list = await api('/api/list-keys');
+    const el = document.getElementById('keysList');
+    if (!list.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-icon">🔑</div>No API keys yet</div>`;
+      return;
+    }
+    el.innerHTML = list.map(k => `
+      <div class="txn" style="flex-direction:column;align-items:stretch;gap:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <b style="font-size:13px">${k.api_key}</b>
+          <button class="copy-btn" onclick="deleteKey('${k.api_key}')"
+            style="background:rgba(255,71,87,.15);color:#ff4757;border:1px solid rgba(255,71,87,.3);
+            padding:4px 10px;border-radius:6px;font-size:11px">Delete</button>
+        </div>
+        <div class="meta">Expiry: ${k.expiry}</div>
+        <div class="api-out"><span>${k.url}</span>
+          <button class="copy-btn" onclick="copyText('${k.url}')">Copy</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+async function deleteKey(k) {
+  if (!confirm('Delete this API key?')) return;
+  try {
+    await api('/api/delete-key/' + k, { method: 'DELETE' });
+    toast('Deleted');
+    loadKeys();
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+
+/* ---------------- History ---------------- */
+async function loadHistory() {
+  try {
+    const d = await api('/api/dashboard');
+    const el = document.getElementById('txnList');
+    if (!d.transactions.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-icon">📜</div>No transactions yet</div>`;
+      return;
+    }
+    el.innerHTML = d.transactions.map(t => `
+      <div class="txn">
+        <div>
+          <div class="amt">+ ₹${t.amount.toFixed(2)}</div>
+          <div class="meta">Txn: ${t.txn_id || '-'} · ${t.paid_at}</div>
+        </div>
+        <div style="text-align:right;font-size:12px;color:var(--text-dim)">${t.order_id || ''}</div>
+      </div>
+    `).join('');
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+
+/* ---------------- Quick QR ---------------- */
+async function quickQR() {
+  try {
+    const amt = parseFloat(document.getElementById('quickAmt').value) || 100;
+    const keys = await api('/api/list-keys');
+    if (!keys.length) return toast('Generate an API key first', true);
+    const url = keys[0].url + '&qr=' + amt;
+    document.getElementById('quickQRBox').innerHTML =
+      `<div class="api-out"><span>${url}</span>
+        <button class="copy-btn" onclick="copyText('${url}')">Copy</button>
+      </div>
+      <a href="${url}" target="_blank" class="btn secondary" style="display:block;text-align:center;
+        text-decoration:none;margin-top:8px;padding:10px">Open QR →</a>`;
+  } catch (e) { toast('❌ ' + e.message, true); }
+}
+
+/* ---------------- Webhook ---------------- */
+function saveWebhook() {
+  localStorage.setItem('webhook', document.getElementById('whUrl').value);
+  toast('✅ Saved locally');
+}
+document.getElementById('whUrl').value = localStorage.getItem('webhook') || '';
+
+/* ---------------- Boot ---------------- */
+(async function boot() {
+  try {
+    await api('/api/me');
+    enterApp();
+  } catch {
+    document.getElementById('authScreen').classList.remove('hidden');
+    document.getElementById('appShell').classList.add('hidden');
+  }
+})();
+</script>
+</body>
+</html>
