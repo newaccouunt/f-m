@@ -7,7 +7,6 @@ from flask import Flask, request, jsonify, render_template, session, g
 from werkzeug.security import generate_password_hash, check_password_hash
 import qrcode
 
-# ---------------- CONFIG ----------------
 app = Flask(__name__, template_folder="templates")
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
@@ -16,7 +15,6 @@ DB_PATH = os.environ.get("DB_PATH", "fampay.db")
 IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 BASE_URL = os.environ.get("BASE_URL", "") 
 
-# ---------------- DB ----------------
 def get_db():
     if 'db' not in g:
         g.db = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -72,7 +70,6 @@ def init_db():
         db.commit()
 init_db()
 
-# ---------------- HELPERS ----------------
 def login_required(f):
     @wraps(f)
     def wrapper(*a, **k):
@@ -102,63 +99,43 @@ def clean_body(msg):
     return ""
 
 def read_fampay_email(username, expected_amount):
-    """
-    Ultra-fast: Only checks emails received TODAY (India time). 
-    Never touches 4000+ old messages.
-    """
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     if not u or not u['email'] or not u['app_password']:
         return False, None, "Email/App Password missing"
-    
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=10)
         mail.login(u['email'], u['app_password'].replace(" ", ""))
         mail.select("inbox", readonly=False)
-
-        # SIRF AAJ KE DIN KE EMAILS SEARCH KARO (India Time)
         today_date = datetime.datetime.now(IST).strftime("%d-%b-%Y")
-        
-        # Search only today's FamPay unread emails
         status, messages = mail.search(None, f'(SINCE "{today_date}" FROM "FamApp")')
         if status != "OK" or not messages[0]:
             mail.logout()
             return False, None, "No new FamPay email today"
-
         email_ids = messages[0].split()
-        
-        # Latest 5 emails check karo (reverse loop)
         for e_id in reversed(email_ids[-5:]):
             status, data = mail.fetch(e_id, '(RFC822)')
             for rp in data:
                 if not isinstance(rp, tuple): continue
                 msg = email.message_from_bytes(rp[1])
-                
-                # Check India Time
                 try:
                     dt = parsedate_to_datetime(msg.get('date')).astimezone(IST)
                     now_ist = datetime.datetime.now(IST)
                     diff_min = (now_ist - dt).total_seconds() / 60
-                    if diff_min > 60 or diff_min < -2: # 1 hour window
-                        continue
+                    if diff_min > 60 or diff_min < -2: continue
                 except: continue
-
                 body = clean_body(msg)
                 am = re.search(r'₹\s?([\d,]+\.?\d*)', body)
                 if not am: continue
-                
                 recv = float(am.group(1).replace(",", ""))
                 if recv < expected_amount - 0.01: continue
-
                 txn_m = re.search(r'Transaction ID\s*:\s*([A-Z0-9]+)', body)
                 txn_id = txn_m.group(1) if txn_m else "UNKNOWN"
                 utr_m = re.search(r'UTR\s*:\s*(\d+)', body)
                 utr = utr_m.group(1) if utr_m else ""
-
                 mail.store(e_id, '+FLAGS', '\\Seen')
                 mail.logout()
                 return True, {"txn_id": txn_id, "utr": utr, "amount": recv}, "OK"
-        
         mail.logout()
         return False, None, "No matching payment today"
     except Exception as e:
@@ -168,7 +145,6 @@ def build_url(path):
     base = BASE_URL.rstrip('/') or request.host_url.rstrip('/')
     return base + path
 
-# ---------------- ROUTES ----------------
 @app.route('/')
 def home(): return render_template("index.html")
 
@@ -234,13 +210,15 @@ def test_email():
         mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=12)
         mail.login(email_addr, app_pass.replace(" ", ""))
         mail.select("inbox", readonly=True)
+        typ, msgs = mail.search(None, 'ALL')  # <-- FIXED
+        total = len(msgs[0].split()) if msgs and msgs[0] else 0 # <-- FIXED
         typ, msgs = mail.search(None, '(UNSEEN)')
         unseen = len(msgs[0].split()) if msgs and msgs[0] else 0
         mail.logout()
         db = get_db()
         db.execute("UPDATE users SET email_status='online', email_last_check=? WHERE username=?",
                    (datetime.datetime.now(IST).isoformat(), session['user'])); db.commit()
-        return jsonify({"ok": True, "message": "✅ Gmail connected!", "unseen_emails": unseen})
+        return jsonify({"ok": True, "message": "✅ Gmail connected!", "total_emails": total, "unseen_emails": unseen}) # <-- FIXED
     except Exception as e:
         db = get_db()
         db.execute("UPDATE users SET email_status='offline' WHERE username=?", (session['user'],)); db.commit()
@@ -252,12 +230,22 @@ def dashboard():
     db = get_db()
     u = db.execute("SELECT * FROM users WHERE username=?", (session['user'],)).fetchone()
     keys = db.execute("SELECT * FROM api_keys WHERE username=?", (session['user'],)).fetchall()
+    
+    # FIX: Ensure chart has data always
+    chart = []
+    for i in range(6, -1, -1):
+        day = (datetime.datetime.now(IST) - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+        s = db.execute("SELECT SUM(amount) as s FROM transactions WHERE username=? AND DATE(paid_at)=?",
+                       (session['user'], day)).fetchone()['s'] or 0
+        chart.append({"day": day, "amount": round(s,2)})
+        
     return jsonify({
         "total_earning": round(u['total_earning'],2), "upi_id": u['upi_id'],
         "email_status": u['email_status'], "email_last_check": u['email_last_check'],
         "total_api_keys": len(keys), "total_requests": sum(k['total_requests'] for k in keys),
         "total_qr_generated": sum(k['total_qr'] for k in keys),
-        "total_received_via_api": round(sum(k['total_received'] for k in keys),2)
+        "total_received_via_api": round(sum(k['total_received'] for k in keys),2),
+        "chart": chart # <-- FIXED
     })
 
 @app.route('/api/generate-key', methods=['POST'])
@@ -292,7 +280,6 @@ def del_key(api_key):
     db.commit()
     return jsonify({"status":"success"})
 
-# ---------------- PUBLIC API (Telegram/Bots) ----------------
 def _key_status(key):
     db = get_db()
     row = db.execute("SELECT * FROM api_keys WHERE api_key=?", (key,)).fetchone()
@@ -351,7 +338,6 @@ def api_check(api_key):
         db.execute("UPDATE qr_sessions SET status='EXPIRED' WHERE order_id=?", (s['order_id'],)); db.commit()
         return jsonify({"status":"EXPIRED"})
 
-    # SUPER FAST CHECK
     ok, info, msg = read_fampay_email(s['username'], s['amount'])
     if ok:
         db.execute("UPDATE qr_sessions SET status='PAID',txn_id=?,utr=?,paid_amount=? WHERE order_id=?",
