@@ -521,19 +521,35 @@ async function loadDashboard(){try{
   }).join('');
 }catch(e){toast('❌ '+e.message,true)}}
 
-/* ---------- account ---------- */
-async function saveAccount(){try{
-  await api('/api/setup-account',{method:'POST',body:JSON.stringify({
-    full_name:document.getElementById('acName').value,
-    upi_id:document.getElementById('acUpi').value,
-    mobile:document.getElementById('acMob').value,
-    email:document.getElementById('acEmail').value,
-    app_password:document.getElementById('acPass').value,
-    default_qr_minutes:parseInt(document.getElementById('acMin').value)||15
-  })});
-  toast('✅ Saved');document.getElementById('acPass').value='';bootApp();
-}catch(e){toast('❌ '+e.message,true)}}
+/* ---------- ACCOUNT SAVE (FIXED) ---------- */
+async function saveAccount(){
+  try {
+    const payload = {
+      full_name: document.getElementById('acName').value.trim(),
+      upi_id: document.getElementById('acUpi').value.trim(),
+      mobile: document.getElementById('acMob').value.trim(),
+      email: document.getElementById('acEmail').value.trim(),
+      app_password: document.getElementById('acPass').value.trim(),
+      default_qr_minutes: parseInt(document.getElementById('acMin').value) || 15
+    };
 
+    // Validation
+    if(!payload.upi_id) return toast('UPI ID required', true);
+    if(!payload.email) return toast('Gmail required', true);
+
+    const res = await api('/api/setup-account', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+
+    toast('✅ Account saved successfully!');
+    document.getElementById('acPass').value = ''; // Clear pass after save
+    bootApp(); // Reload dashboard data
+  } catch(e) {
+    toast('❌ ' + e.message, true);
+  }
+}
+  
 async function testEmail(){try{
   document.getElementById('testRes').innerHTML='<div style="color:var(--warning)">⏳ Testing…</div>';
   const d=await api('/api/test-email',{method:'POST',body:JSON.stringify({
