@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: fampay-autoqr
+    name: fampay-bronx
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
