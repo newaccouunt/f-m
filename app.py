@@ -4,6 +4,7 @@ from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from functools import wraps
 from flask import Flask, request, jsonify, render_template_string, session, g
+from flask_cors import CORS # NAYA: Baki websites/apps se connect karne ke liye
 from werkzeug.security import generate_password_hash, check_password_hash
 import qrcode
 
@@ -11,6 +12,7 @@ import qrcode
 # CONFIGURATION & DATABASE SETUP
 # ==========================================
 app = Flask(__name__)
+CORS(app) # NAYA: Ab PHP, JS, React, Telegram Bot sab bina error ke API call kar sakte hain
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
@@ -106,7 +108,7 @@ def clean_body(msg):
     return ""
 
 # ==========================================
-# FLASH SPEED EMAIL CHECK (Only Last 5 Mins)
+# ULTRA FAST EMAIL CHECK (Only Last 5 Mins)
 # ==========================================
 def read_fampay_email(username, expected_amount):
     db = get_db()
@@ -118,24 +120,27 @@ def read_fampay_email(username, expected_amount):
         mail.login(u['email'], u['app_password'].replace(" ", ""))
         mail.select("inbox", readonly=False)
         
-        # Sirf aaj ke emails check karo
         today_date = datetime.datetime.now(IST).strftime("%d-%b-%Y")
         
-        # Gmail search: Sirf FamApp se aaye hue emails jo aaj ke hain
-        status, messages = mail.search(None, f'(SINCE "{today_date}" FROM "FamApp")')
+        # SUPER FAST: Sirf aaj ke UNSEEN (naye) emails search karega
+        status, messages = mail.search(None, f'(SINCE "{today_date}" UNSEEN)')
         
         if status != "OK" or not messages[0]:
             mail.logout()
-            return False, None, "No new FamPay email today"
+            return False, None, "No new unread email today"
             
         email_ids = messages[0].split()
         
-        # Sirf latest 5 emails check karo (reverse order)
-        for e_id in reversed(email_ids[-5:]):
+        # Sirf latest 3 emails check karo (reverse order) taki speed fast rahe
+        for e_id in reversed(email_ids[-3:]):
             status, data = mail.fetch(e_id, '(RFC822)')
             for rp in data:
                 if not isinstance(rp, tuple): continue
                 msg = email.message_from_bytes(rp[1])
+                
+                # FAMPAY EMAIL CHECK
+                subj = msg.get('subject', '')
+                if "Fam" not in subj: continue
                 
                 # Time Filter: Sirf 5 minute purane email check karo
                 try:
@@ -143,7 +148,7 @@ def read_fampay_email(username, expected_amount):
                     now_ist = datetime.datetime.now(IST)
                     diff_min = (now_ist - dt).total_seconds() / 60
                     if diff_min > 5 or diff_min < -2: 
-                        continue # Purane emails (jaise 7:50) skip ho jayenge
+                        continue # 4-5k purane emails skip ho jayenge
                 except: continue
                 
                 body = clean_body(msg)
@@ -311,7 +316,6 @@ def del_key(api_key):
 # ==========================================
 def _key_status(key):
     db = get_db()
-    # Clean any trailing '&' or '?' from key
     clean_key = key.split('&')[0].split('?')[0]
     row = db.execute("SELECT * FROM api_keys WHERE api_key=?", (clean_key,)).fetchone()
     if not row: return None, "invalid"
@@ -321,9 +325,8 @@ def _key_status(key):
         except: pass
     return row, "active"
 
-@app.route('/v2/fam/<path:api_key>') # Using <path> to handle slashes or extra params
+@app.route('/v2/fam/<path:api_key>') 
 def fam_qr(api_key):
-    # SMART FIX: URL se amount nikalna (chahe ?qr=100 ho ya &qr=100)
     amount_str = request.args.get('qr')
     if not amount_str and '&qr=' in request.full_path:
         amount_str = request.full_path.split('&qr=')[1].split('&')[0].split('?')[0]
@@ -368,7 +371,7 @@ def api_check(api_key):
     
     if not s: return jsonify({"status":"NOTFOUND"})
     if s['status'] == 'PAID':
-        return jsonify({"status":"PAID", "order_id":s['order_id'], "amount":s['amount'], "txn_id":s['txn_id'], "utr":s['utr']})
+        return jsonify({"status":"PAID", "order_id":s['order_id'], "amount":s['paid_amount'] or s['amount'], "txn_id":s['txn_id'], "utr":s['utr']})
     if time.time() > s['expires_at']:
         db.execute("UPDATE qr_sessions SET status='EXPIRED' WHERE order_id=?", (s['order_id'],)); db.commit()
         return jsonify({"status":"EXPIRED"})
@@ -409,9 +412,100 @@ def check_payment(order_id):
     return jsonify({"status":"PENDING"})
 
 # ==========================================
-# HTML TEMPLATES (Neon Rainbow Theme)
+# ADVANCED SUCCESS UI FOR QR PAGE
 # ==========================================
+QR_HTML_TEMPLATE = """
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pay ₹{{ amount }}</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box;font-family:'Inter',sans-serif}
+body{background:#05050a;color:#e8e8f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:radial-gradient(circle at 30% 20%,rgba(0,224,164,.15),transparent 45%),radial-gradient(circle at 70% 80%,rgba(168,85,247,.15),transparent 45%),#05050a;overflow:hidden}
+.card{width:100%;max-width:430px;background:#0f0f1e;border:1px solid #1f1f3a;border-radius:24px;padding:30px 24px;box-shadow:0 0 60px rgba(0,224,164,.12);text-align:center;position:relative;transition:all 0.4s ease}
+.tag{font-size:12px;color:#7a7a9a;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px}
+h1{font-size:44px;font-weight:900;margin:6px 0;background:linear-gradient(90deg,#00ffb3,#a855f7,#ff00aa);-webkit-background-clip:text;color:transparent}
+.qr-wrap{background:#fff;border-radius:18px;padding:12px;display:inline-block;margin:16px 0;box-shadow:0 0 50px rgba(0,224,164,.3);position:relative;transition:all 0.4s}
+.qr-wrap img{display:block;width:240px;height:240px;transition:all 0.3s}
+.logos{display:flex;justify-content:center;gap:8px;margin:14px 0;flex-wrap:wrap}
+.logos span{background:#fff;color:#000;padding:6px 11px;border-radius:8px;font-weight:700;font-size:11px}
+.timer{font-size:30px;font-weight:800;margin:10px 0;color:#00e0a4;letter-spacing:1px;font-variant-numeric:tabular-nums}
+.status{padding:14px;border-radius:12px;font-weight:600;font-size:14px;margin-top:8px;transition:all 0.3s}
+.pending{background:rgba(255,165,2,.12);color:#ffa502}
+.expired{background:rgba(255,71,87,.15);color:#ff4757}
+.upi{font-size:12px;color:#7a7a9a;margin-top:8px}.upi b{color:#e8e8f5}
 
+/* NAYA PREMIUM SUCCESS UI */
+.success-overlay{position:absolute;inset:0;background:#0f0f1e;border-radius:24px;display:none;flex-direction:column;align-items:center;justify-content:center;padding:30px;z-index:10;opacity:0;transition:opacity 0.4s}
+.success-overlay.show{display:flex;opacity:1}
+.check-icon{width:90px;height:90px;border-radius:50%;background:rgba(0,224,164,.15);border:2px solid #00e0a4;display:flex;align-items:center;justify-content:center;font-size:45px;margin-bottom:20px;box-shadow:0 0 30px rgba(0,224,164,0.5);animation:popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)}
+@keyframes popIn{0%{transform:scale(0)}100%{transform:scale(1)}}
+.success-title{font-size:26px;font-weight:900;color:#00e0a4;margin-bottom:6px}
+.success-amt{font-size:40px;font-weight:900;background:linear-gradient(90deg,#00ffb3,#00d4ff);-webkit-background-clip:text;color:transparent;margin-bottom:20px}
+.success-details{background:#15152a;border:1px solid #1f1f3a;border-radius:12px;padding:16px;width:100%;text-align:left;font-size:12px}
+.success-details div{display:flex;justify-content:space-between;margin-bottom:8px;color:#7a7a9a}
+.success-details div:last-child{margin-bottom:0}
+.success-details b{color:#e8e8f5;font-weight:700}
+</style></head><body>
+<div class="card" id="mainCard">
+    <div class="tag">Pay via UPI</div>
+    <h1>₹{{ "%.2f"|format(amount) }}</h1>
+    <div class="upi">to <b>{{ full_name }}</b> · {{ upi_id }}</div>
+    <div class="qr-wrap" id="qrWrap"><img src="{{ qr_b64 }}"></div>
+    <div class="logos"><span>GPay</span><span>PhonePe</span><span>Paytm</span><span>UPI</span></div>
+    <div class="timer" id="timer">{{ '%02d:00'|format(minutes) }}</div>
+    <div class="status pending" id="status">⏳ Waiting for payment...</div>
+
+    <!-- Premium Success Overlay -->
+    <div class="success-overlay" id="successOverlay">
+        <div class="check-icon">✅</div>
+        <div class="success-title">Payment Successful</div>
+        <div class="success-amt" id="successAmt">₹{{ amount }}</div>
+        <div class="success-details">
+            <div><span>Txn ID</span><b id="successTxn">-</b></div>
+            <div><span>UTR</span><b id="successUtr">-</b></div>
+            <div><span>Status</span><b style="color:#00e0a4">Verified ✅</b></div>
+        </div>
+    </div>
+</div>
+<script>
+const orderId="{{ order_id }}", totalSecs={{ minutes*60 }};
+let secs=totalSecs, tInt, pInt;
+const T=document.getElementById('timer'), S=document.getElementById('status');
+
+function tick(){
+    secs--;
+    if(secs<=0){
+        T.textContent='00:00'; T.style.color='#ff4757';
+        S.textContent='❌ QR Expired'; S.className='status expired';
+        clearInterval(tInt); clearInterval(pInt); return;
+    }
+    const m=String(Math.floor(secs/60)).padStart(2,'0'), s=String(secs%60).padStart(2,'0');
+    T.textContent=m+':'+s; if(secs<=60) T.style.color='#ff4757';
+}
+
+async function poll(){
+    try{
+        const r=await fetch('/api/check-payment/'+orderId), d=await r.json();
+        if(d.status==='PAID'){
+            // SHOW PREMIUM SUCCESS UI
+            document.getElementById('successAmt').textContent = '₹' + (d.txn.amount || '{{ amount }}');
+            document.getElementById('successTxn').textContent = d.txn.txn_id || '-';
+            document.getElementById('successUtr').textContent = d.txn.utr || '-';
+            document.getElementById('successOverlay').classList.add('show');
+            clearInterval(tInt); clearInterval(pInt);
+        }
+        else if(d.status==='EXPIRED'){
+            S.textContent='❌ QR Expired'; S.className='status expired';
+            clearInterval(tInt); clearInterval(pInt);
+        }
+    }catch(e){}
+}
+tInt=setInterval(tick,1000); pInt=setInterval(poll,3000); poll();
+</script></body></html>
+"""
+
+# ==========================================
+# MAIN HTML TEMPLATE (Dashboard)
+# ==========================================
 MAIN_HTML = """
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -680,45 +774,6 @@ async function loadHistory(){try{
 }catch(e){toast('❌ '+e.message,true)}}
 
 (async()=>{try{await api('/api/me');bootApp()}catch{}})();
-</script></body></html>
-"""
-
-QR_HTML_TEMPLATE = """
-<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Pay ₹{{ amount }}</title><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
-<style>
-*{margin:0;padding:0;box-sizing:border-box;font-family:'Inter',sans-serif}
-body{background:#05050a;color:#e8e8f5;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;background:radial-gradient(circle at 30% 20%,rgba(0,224,164,.15),transparent 45%),radial-gradient(circle at 70% 80%,rgba(168,85,247,.15),transparent 45%),#05050a}
-.card{width:100%;max-width:430px;background:#0f0f1e;border:1px solid #1f1f3a;border-radius:24px;padding:30px 24px;box-shadow:0 0 60px rgba(0,224,164,.12);text-align:center}
-.tag{font-size:12px;color:#7a7a9a;text-transform:uppercase;letter-spacing:2px;margin-bottom:6px}
-h1{font-size:44px;font-weight:800;margin:6px 0;background:linear-gradient(90deg,#00ffb3,#a855f7,#ff00aa);-webkit-background-clip:text;color:transparent}
-.qr-wrap{background:#fff;border-radius:18px;padding:12px;display:inline-block;margin:16px 0;box-shadow:0 0 50px rgba(0,224,164,.3);position:relative}
-.qr-wrap img{display:block;width:240px;height:240px}
-.qr-wrap.verified::after{content:'✅';position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:130px;background:rgba(0,224,164,.9);border-radius:18px}
-.logos{display:flex;justify-content:center;gap:8px;margin:14px 0;flex-wrap:wrap}
-.logos span{background:#fff;color:#000;padding:6px 11px;border-radius:8px;font-weight:700;font-size:11px}
-.timer{font-size:30px;font-weight:800;margin:10px 0;color:#00e0a4;letter-spacing:1px;font-variant-numeric:tabular-nums}
-.status{padding:14px;border-radius:12px;font-weight:600;font-size:14px;margin-top:8px}
-.pending{background:rgba(255,165,2,.12);color:#ffa502}
-.paid{background:rgba(0,224,164,.15);color:#00e0a4}
-.expired{background:rgba(255,71,87,.15);color:#ff4757}
-.upi{font-size:12px;color:#7a7a9a;margin-top:8px}.upi b{color:#e8e8f5}
-</style></head><body>
-<div class="card"><div class="tag">Pay via UPI</div><h1>₹{{ "%.2f"|format(amount) }}</h1>
-<div class="upi">to <b>{{ full_name }}</b> · {{ upi_id }}</div>
-<div class="qr-wrap" id="qrWrap"><img src="{{ qr_b64 }}"></div>
-<div class="logos"><span>GPay</span><span>PhonePe</span><span>Paytm</span><span>UPI</span></div>
-<div class="timer" id="timer">{{ '%02d:00'|format(minutes) }}</div>
-<div class="status pending" id="status">⏳ Waiting for payment...</div></div>
-<script>
-const orderId="{{ order_id }}",totalSecs={{ minutes*60 }};let secs=totalSecs,tInt,pInt;
-const T=document.getElementById('timer'),S=document.getElementById('status');
-function tick(){secs--;if(secs<=0){T.textContent='00:00';T.style.color='#ff4757';S.textContent='❌ QR Expired';S.className='status expired';clearInterval(tInt);clearInterval(pInt);return}
-const m=String(Math.floor(secs/60)).padStart(2,'0'),s=String(secs%60).padStart(2,'0');T.textContent=m+':'+s;if(secs<=60)T.style.color='#ff4757';}
-async function poll(){try{const r=await fetch('/api/check-payment/'+orderId),d=await r.json();
-if(d.status==='PAID'){S.textContent='✅ Verified! Txn: '+(d.txn?.txn_id||'');S.className='status paid';document.getElementById('qrWrap').classList.add('verified');T.textContent='PAID';T.style.color='#00e0a4';clearInterval(tInt);clearInterval(pInt);}
-else if(d.status==='EXPIRED'){S.textContent='❌ QR Expired';S.className='status expired';clearInterval(tInt);clearInterval(pInt);}}catch(e){}}
-tInt=setInterval(tick,1000);pInt=setInterval(poll,5000);poll();
 </script></body></html>
 """
 
